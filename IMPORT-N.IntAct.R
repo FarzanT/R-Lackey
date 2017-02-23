@@ -1,36 +1,55 @@
-if (!require("readr")) {
-  lapply(
-    X = c("stringr", "readr", "igraph"),
-    FUN = install.packages,
-    character.only = TRUE
-  )
-}
 lapply(
   X = c("stringr", "readr", "igraph"),
-  FUN = library,
+  FUN = require,
   character.only = TRUE
 )
 
-# xUd should be passed as a date object (Y-M-D)
-IMPORT_N_IntAct <- function(fName,
-                            det.method = NULL,
-                            xS = NULL,
-                            xQ = NULL,
-                            xN = 10000,
-                            xUd = NULL,
-                            tax = 9606) {
+#' Import from IntAct, HINT + HI2012, iRefIndex, inBioMap
+#'
+#' \code{IMPORT_N_MITAB} saves the gene graph object of specified attributes.
+#'
+#' This function reads from the specifed MITAB file, and selects rows based
+#' on the specified parameters such as det.method, confidence value, rank and
+#' quantile, and update date cutoffs.
+#' 
+#' @section File status: File must be already unzipped
+#' @section At most only one of xS, xQ or xN values may be specified
+#' 
+#' @param fName The path of the MITAB file, or name if in working directory in
+#' string format
+#' @param det.method A vector of valid detection method IDs in MI format
+#' @param xS A cutoff value for confidence score value
+#' @param xQ A cutoff value for confidence score quantile
+#' @param xN A cutoff value; xN highest confidence scores. Default 10000.
+#' @param xUd A cutoff value for interaction update date, must be in Date format
+#' @param tax Selects the taxonomy of both interactors. Default 9606 (Human)
+#' 
+#' @examples
+#' IMPORT_N_MITAB("intact.txt", xS = 0.75)
+#' myDetMethod <- c("MI:0084","MI:0081","MI:0055","MI:0096","MI:0411","MI:0049")
+#' myDate <- as.Date("2013-6-7")
+#' IMPORT_N_MITAB("intact.txt", det.method = myDetMethod, xQ = 0.85,
+#'  xUd = myDate)
+IMPORT_N_MITAB <- function(fName,
+                           det.method,
+                           xS,
+                           xQ,
+                           xN = 10000,
+                           xUd,
+                           tax = 9606) {
   # Check given values for correctness.
-  if (!(sum(is.null(xS), is.null(xQ)) < 2)) {
+  # Check for excess arguments, at least two should be missing
+  if (sum(c(missing(xS), missing(xQ), missing(xN))) < 2) {
     stop("Only one value to either xS, xQ or xN should be given.")
   }
-  if ((!(is.null(xQ))) && (!((0 < xQ) && (xQ < 100)))) {
+  # Check for incorrect quantile range
+  if ((!(missing(xQ))) && (!((0 <= xQ) && (xQ <= 1)))) {
     stop("xQ has undefined value.")
   }
-  # Columns to extract ("-" and "_" mean "skip")
+  # Columns to extract 
+  # c takes in a vector as.character, D as date and "-" and "_" skip column
   relevant_columns <-
     c("cc_-_-c_ccccccc_-_-_-_-_-_-_-_-D_-_-_-_-_-")
-  nchar(relevant_columns)
-  # col_types = relevant_columns
   # Read and select relevant fields, drop the rest.
   system.time(
     LINES <-
@@ -51,31 +70,26 @@ IMPORT_N_IntAct <- function(fName,
   # 10: Confidence Value, 11: Update Date
   
   # Find indices of rows with both interactors of specifided tax id.
-  system.time(SpeciesIndices <- Reduce(intersect,
-                                       list(
-                                         # Tax ID Interactor A
-                                         grep(x = unlist(LINES[, 5]),
-                                              pattern = as.character(tax)),
-                                         # Tax ID Interactor B
-                                         grep(x = unlist(LINES[, 6]),
-                                              pattern = as.character(tax))
-                                       )))
+  system.time(SpeciesIndices <- grepl(x = unlist(LINES[, 5]),
+                                      pattern = as.character(tax)) & grepl(x = unlist(LINES[, 6]),
+                                                                           pattern = as.character(tax)))
   # Subset for species (argument on the right) and append to IntActSpecies
-  LINES <- LINES[SpeciesIndices,]
-  # Remove large integer
+  system.time(LINES <- LINES[SpeciesIndices,])
+  # Remove large vector
   rm(SpeciesIndices)
   
   # Extract and in-place replace "Confidence values" with the double itself.
   system.time(LINES[, 10] <-
-                as.numeric(unlist(
-                  str_extract_all(string = unlist(LINES[, 10]),
-                                  pattern = "\\d\\.\\d\\d$")
-                )))
+                as.numeric(
+                  gsub(x = unlist(LINES[, 10]),
+                       pattern = ".*(\\d\\.\\d\\d)",
+                       replacement = "\\1", fixed = FALSE))
+  )
   # If xQ or xN is given, calculate and set to Top. If not, set xS as top.
-  if (!is.null(xQ)) {
+  if (!missing(xQ)) {
     Top <- quantile(unlist(LINES[, 10]),
                     probs = xQ)
-  } else if (!is.null(xS)) {
+  } else if (!missing(xS)) {
     # Confidence score more than xS
     Top <- xS
   } else {
@@ -84,12 +98,23 @@ IMPORT_N_IntAct <- function(fName,
   }
   
   # Extract and in-place replace "interaction type" IDs, save for use.
+  LINES2 <- LINES
+  LINES3 <- LINES
   system.time(LINES[, 7] <-
                 (as.character(
                   cur_interaction_types <-
                     str_extract_all(unlist(LINES[, 7]),
                                     pattern = "[A-Z]{2}:[:digit:]{4}")
                 )))
+  
+  # TODO: Do what str_extract_all does with gsub
+  # system.time(LINES[, 7] <-
+  #               (as.character(
+  #                 cur_interaction_types <-
+  #                   gsub(x = unlist(LINES[, 7]), 
+  #                        pattern = ".*\"([A-Z]{2}:[:digit:]{4})\".*",
+  #                        replacement = "\\1")
+  #               )))
   # Extract and in-place replace "Interaction detection methods", save for use
   system.time(LINES[, 3] <-
                 (as.character(
@@ -191,12 +216,13 @@ det.method <- c("MI:0084",
                 "MI:0411",
                 "MI:0049")
 myDate <- as.Date("2013-6-7")
-system.time(IMPORT_N_IntAct(
-  fName = "intact.txt",
+system.time(IMPORT_N_MITAB(
+  fName = "Data/HomoSapiens_binary_hq.txt",
   det.method = det.method,
   xQ = 0.75,
   xUd = myDate
 ))
+Sptm <- proc.time()
 graph <- readRDS(file = "IntAct_Gene_Graph")
 gXY <- layout_with_fr(graph = graph,
                       dim = 3)
@@ -215,3 +241,4 @@ plot(
   edge.arrow.size = 0
 )
 par(oPar)
+proc.time() - ptm
